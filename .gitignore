@@ -272,3 +272,5 @@ __azurite_db_blob__.json
 .vscode/
 .config/
 __blobstorage__
+
+AzuriteConfig
