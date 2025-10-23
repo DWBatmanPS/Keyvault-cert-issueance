@@ -32,7 +32,21 @@ public class AcmeAccountService
     {
         var server = GetServer(staging);
 
+        string? explicitProd = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_PROD");
+        string? explicitStaging = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_STAGING");
+
         // Prefer Key Vault secret if specified
+        string? resolvedSecretName = null;
+        if (secretClient != null)
+        {
+            if (staging && !string.IsNullOrWhiteSpace(explicitStaging))
+                resolvedSecretName = explicitStaging;
+            else if (!staging && !string.IsNullOrWhiteSpace(explicitProd))
+                resolvedSecretName = explicitProd;
+            else if (!string.IsNullOrWhiteSpace(secretName))
+                resolvedSecretName = staging ? $"{secretName}-staging" : secretName; // suffix fallback
+        }
+    
         if (!string.IsNullOrWhiteSpace(secretName) && secretClient != null)
         {
             try
@@ -55,7 +69,7 @@ public class AcmeAccountService
             }
             catch (Exception ex)
             {
-                return (null, _responses.Error("account_error", "Failed loading ACME account from Key Vault secret.",
+                return (null, _responses.Error("account_error", "Failed loading ACME account from Key Vault secret '{resolvedSecretName}'.",
                     ex.Message), false);
             }
         }
