@@ -23,7 +23,9 @@ var appServicePlanName = 'plan-${appNamePrefix}-${substring(uniqueString(resourc
 var appInsightsName = 'appi-${appNamePrefix}-${substring(uniqueString(resourceGroup().id, deployment().name), 0, 4)}'
 var workspaceName = 'log-${appNamePrefix}-${substring(uniqueString(resourceGroup().id, deployment().name), 0, 4)}'
 var storageAccountName = 'st${uniqueString(resourceGroup().id, deployment().name)}func'
-var roleDefinitionId = resourceId('Microsoft.Authorization/roleDefinitions/', 'a4417e6f-fecd-4de8-b567-7b0420556985')
+var KVCertOfficerRoleId = resourceId('Microsoft.Authorization/roleDefinitions/', 'a4417e6f-fecd-4de8-b567-7b0420556985')
+var KVCryptoOfficerRoleId = resourceId('Microsoft.Authorization/roleDefinitions/', '14b46e9e-c2b7-41b4-b07b-48a6ebf60603')
+var KVSecOfficerRoleId = resourceId('Microsoft.Authorization/roleDefinitions/', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')
 var dnsZoneContributorRoleId = resourceId('Microsoft.Authorization/roleDefinitions', 'befefa01-2a29-4197-83a8-272ff33ce314')
 var blobDataContributorRoleId = resourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
 var queueDataContributorRoleId = resourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
@@ -475,7 +477,9 @@ module keyVault_ruleAssignment 'authmodule.bicep' = {
   scope: resourceGroup(KVResourceGroup)
   params: {
     functionAppNameprincipal: functionApp.identity.principalId
-    roleDefinitionId: roleDefinitionId
+    KVCertOfficerRoleId: KVCertOfficerRoleId
+    KVCryptoOfficerRoleId: KVCryptoOfficerRoleId
+    KVSecOfficerRoleId: KVSecOfficerRoleId
     functionAppName: functionAppName
     keyVaultName: keyVaultName
   }
