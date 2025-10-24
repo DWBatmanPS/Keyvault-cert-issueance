@@ -9,6 +9,7 @@ using Certes.Acme;
 using Certes.Pkcs;
 using Keyvault_cert_issueance.Models;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography;
 
 namespace Keyvault_cert_issueance.Services;
 
@@ -110,7 +111,15 @@ public class CertificateOrderService
             var certChain = await order.Download();
             var leafDer = certChain.Certificate.ToDer();
             var issuerDers = certChain.Issuers?.Select(i => i.ToDer()).ToList() ?? new List<byte[]>();
-            bool stagingLeafOnly = staging && issuerDers.Count == 0;
+
+            // Detect conditions
+            bool noIssuers = issuerDers.Count == 0;
+            bool forceLeafEnv = Environment.GetEnvironmentVariable("FORCE_LEAF_ONLY")?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false;
+            bool allowLeafFallbackEnv = Environment.GetEnvironmentVariable("LEAF_ONLY_FALLBACK")?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false;
+
+            // Optionally pattern match staging pseudo roots/intermediates (names are included in the exception you saw)
+            bool stagingEnv = staging;
+            bool initialLeafOnly = forceLeafEnv || noIssuers;
 
             string TrySubject(byte[] der)
             {
@@ -118,91 +127,121 @@ public class CertificateOrderService
                 catch { return "<unparseable>"; }
             }
 
-            log?.Invoke($"[{correlationId}] Leaf='{TrySubject(leafDer)}' Intermediates={issuerDers.Count} StagingLeafOnly={stagingLeafOnly}");
+            log?.Invoke($"[{correlationId}] Leaf='{TrySubject(leafDer)}' Intermediates={issuerDers.Count} forceLeaf={forceLeafEnv}");
 
+            // PFX assembly
             byte[] pfxBytes;
-            bool leafFallbackUsed = false;
+            bool leafOnlyFinal = false;
+
+            RSA BuildPrivateKeyFromCsr(IKey key)
+            {
+                // csrKey.ToPem() returns private key PEM
+                var rsa = RSA.Create();
+                rsa.ImportFromPem(key.ToPem());
+                return rsa;
+            }
+
+            // Manual leaf-only builder (pure .NET)
+            byte[] BuildLeafOnlyPfx()
+            {
+                var leafX509 = new X509Certificate2(leafDer);
+                using var rsa = BuildPrivateKeyFromCsr(csrKey);
+                using var withKey = leafX509.CopyWithPrivateKey(rsa);
+                return string.IsNullOrEmpty(pfxPassword)
+                    ? withKey.Export(X509ContentType.Pfx)
+                    : withKey.Export(X509ContentType.Pfx, pfxPassword);
+            }
 
             try
             {
-                if (!stagingLeafOnly)
+                if (!initialLeafOnly)
                 {
-                    // Standard chain build
-                    var pfxBuilder = certChain.ToPfx(csrKey);
-                    pfxBytes = pfxBuilder.Build(certificateName, pfxPassword);
-                    log?.Invoke($"[{correlationId}] PFX built with standard chain.");
+                    // Try standard chain first
+                    try
+                    {
+                        var pfxBuilder = certChain.ToPfx(csrKey);
+                        pfxBytes = pfxBuilder.Build(certificateName, pfxPassword);
+                        log?.Invoke($"[{correlationId}] Standard chain build succeeded (issuers={issuerDers.Count}).");
+                    }
+                    catch (Exception stdEx)
+                    {
+                        log?.Invoke($"[{correlationId}] Standard chain build failed: {stdEx.Message}; attempting manual chain.");
+                        // Manual chain assembly
+                        try
+                        {
+                            var manualBuilder = new Certes.Pkcs.PfxBuilder(leafDer, csrKey);
+                            foreach (var issuer in issuerDers)
+                            {
+                                try
+                                {
+                                    manualBuilder.AddIssuer(issuer);
+                                    log?.Invoke($"[{correlationId}] Added issuer: {TrySubject(issuer)}");
+                                }
+                                catch (Exception addEx)
+                                {
+                                    log?.Invoke($"[{correlationId}] Failed adding issuer {TrySubject(issuer)}: {addEx.Message}");
+                                }
+                            }
+                            pfxBytes = manualBuilder.Build(certificateName, pfxPassword);
+                            log?.Invoke($"[{correlationId}] Manual chain build succeeded.");
+                        }
+                        catch (Exception manualEx)
+                        {
+                            bool canLeafFallback = stagingEnv || allowLeafFallbackEnv;
+                            if (canLeafFallback)
+                            {
+                                log?.Invoke($"[{correlationId}] Manual chain failed: {manualEx.Message}; attempting leaf-only fallback.");
+                                try
+                                {
+                                    pfxBytes = BuildLeafOnlyPfx();
+                                    leafOnlyFinal = true;
+                                    log?.Invoke($"[{correlationId}] Leaf-only fallback succeeded.");
+                                }
+                                catch (Exception leafEx)
+                                {
+                                    return (null, _responses.Error(
+                                        "chain_error",
+                                        "Chain assembly failed (leaf fallback also failed).",
+                                        $"{stdEx.Message} | {manualEx.Message} | {leafEx.Message}"));
+                                }
+                            }
+                            else
+                            {
+                                return (null, _responses.Error(
+                                    "chain_error",
+                                    "Chain assembly failed (leaf fallback disabled).",
+                                    $"{stdEx.Message} | {manualEx.Message}"));
+                            }
+                        }
+                    }
                 }
                 else
                 {
-                    // Staging returned only leaf
-                    var leafBuilder = new PfxBuilder(leafDer, csrKey);
-                    pfxBytes = leafBuilder.Build(certificateName, pfxPassword);
-                    leafFallbackUsed = true;
-                    log?.Invoke($"[{correlationId}] Staging chain absent; built leaf-only PFX.");
+                    // Direct leaf-only path
+                    pfxBytes = BuildLeafOnlyPfx();
+                    leafOnlyFinal = true;
+                    log?.Invoke($"[{correlationId}] Proceeding leaf-only (no issuers or forced).");
                 }
             }
-            catch (Exception stdEx)
+            catch (Exception fatalEx)
             {
-                log?.Invoke($"[{correlationId}] Standard PFX build failed: {stdEx.Message}; attempting manual chain.");
-
-                try
-                {
-                    var manualBuilder = new PfxBuilder(leafDer, csrKey);
-                    foreach (var issuer in issuerDers)
-                    {
-                        try { manualBuilder.AddIssuer(issuer); }
-                        catch (Exception addEx)
-                        {
-                            log?.Invoke($"[{correlationId}] Issuer add failed '{TrySubject(issuer)}': {addEx.Message}");
-                        }
-                    }
-                    pfxBytes = manualBuilder.Build(certificateName, pfxPassword);
-                    log?.Invoke($"[{correlationId}] Manual chain build succeeded.");
-                }
-                catch (Exception manualEx)
-                {
-                    // Leaf-only fallback if staging or explicitly allowed
-                    bool allowLeaf = staging || (Environment.GetEnvironmentVariable("LEAF_ONLY_FALLBACK")?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false);
-                    if (allowLeaf)
-                    {
-                        try
-                        {
-                            var leafBuilder2 = new PfxBuilder(leafDer, csrKey);
-                            pfxBytes = leafBuilder2.Build(certificateName, pfxPassword);
-                            leafFallbackUsed = true;
-                            log?.Invoke($"[{correlationId}] Leaf-only fallback succeeded after manual failure.");
-                        }
-                        catch (Exception leafEx)
-                        {
-                            return (null, _responses.Error(
-                                "chain_error",
-                                "Chain assembly failed (leaf fallback also failed).",
-                                $"{stdEx.Message} | {manualEx.Message} | {leafEx.Message}"));
-                        }
-                    }
-                    else
-                    {
-                        return (null, _responses.Error(
-                            "chain_error",
-                            "Chain assembly failed (leaf fallback disabled).",
-                            $"{stdEx.Message} | {manualEx.Message}"));
-                    }
-                }
+                return (null, _responses.Error("leaf_build_error", "Failed constructing PFX.", fatalEx.Message));
             }
 
-            // Import
+            // Import (pass leafOnly flag)
             var importResult = await _kvService.ImportCertificateVersionAsync(
                 keyVaultName,
                 certificateName,
                 pfxBytes,
                 pfxPassword,
                 allDomains.ToArray(),
-                renewed: false);
+                renewed: false,
+                leafOnly: leafOnlyFinal);
 
             if (importResult.error != null) return (null, importResult.error);
 
-            if (leafFallbackUsed)
-                log?.Invoke($"[{correlationId}] Imported leaf-only certificate (intermediates missing).");
+            if (leafOnlyFinal)
+                log?.Invoke($"[{correlationId}] Imported leaf-only certificate (intermediates unavailable).");
 
             return (importResult.meta, null);
         }

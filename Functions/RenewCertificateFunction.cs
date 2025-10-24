@@ -72,6 +72,7 @@ public class RenewCertificateFunction
                 return;
             }
 
+            // Environment inputs for new order
             string email = Environment.GetEnvironmentVariable("LE_EMAIL") ?? "";
             string subscriptionId = Environment.GetEnvironmentVariable("AZURE_SUBSCRIPTION_ID") ?? "";
             string resourceGroup = Environment.GetEnvironmentVariable("RESOURCE_GROUP") ?? "";
@@ -80,7 +81,6 @@ public class RenewCertificateFunction
             bool dryRun = Environment.GetEnvironmentVariable("LE_DRY_RUN")?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false;
             bool cleanupDns = Environment.GetEnvironmentVariable("CLEANUP_DNS")?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false;
             string? pfxPassword = Environment.GetEnvironmentVariable("PFX_PASSWORD");
-            string? accountSecretName = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME");
 
             int propagationMinutes = ParseIntEnv("MAX_PROPAGATION_MINUTES", 2, 1, 15);
             int challengeMinutes = ParseIntEnv("MAX_CHALLENGE_MINUTES", 5, 1, 15);
@@ -95,15 +95,24 @@ public class RenewCertificateFunction
                 return;
             }
 
-            SecretClient? secretClient = null;
-            if (!string.IsNullOrWhiteSpace(accountSecretName))
-                secretClient = new SecretClient(new Uri($"https://{keyVaultName}.vault.azure.net/"), _credential);
+            // NEW: gather secret naming variants
+            string? accountSecretNameBase    = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME");
+            string? accountSecretNameStaging = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_STAGING");
+            string? accountSecretNameProd    = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_PROD");
+
+            // Always create SecretClient if we have a vault; AcmeAccountService will resolve proper secret name.
+            SecretClient secretClient = new SecretClient(new Uri($"https://{keyVaultName}.vault.azure.net/"), _credential);
+
+            // For logging, show expected secret path
+            var expectedSecretName = staging
+                ? (accountSecretNameStaging ?? (accountSecretNameBase != null ? $"{accountSecretNameBase}-staging" : "blob-fallback"))
+                : (accountSecretNameProd ?? accountSecretNameBase ?? "blob-fallback");
 
             var primary = domains[0];
             var extras = domains.Skip(1).ToArray();
 
-            _logger.LogInformation("RenewCertificate CorrelationId={CorrelationId} renewing cert={CertName} expires={Expires} primary={Primary}",
-                correlationId, certName, current.NotAfter, primary);
+            _logger.LogInformation("RenewCertificate CorrelationId={CorrelationId} renewing cert={CertName} expires={Expires} primary={Primary} secretNameExpected={SecretNameExpected}",
+                correlationId, certName, current.NotAfter, primary, expectedSecretName);
 
             var orderResult = await _orderService.IssueCertificateAsync(
                 correlationId,
@@ -122,7 +131,7 @@ public class RenewCertificateFunction
                 keyVaultName,
                 pfxPassword,
                 secretClient,
-                accountSecretName,
+                accountSecretNameBase, // pass base only; service maps to staging/prod/env-specific secret
                 msg => _logger.LogInformation(msg));
 
             var meta = orderResult.meta;

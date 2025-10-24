@@ -35,46 +35,48 @@ public class AcmeAccountService
         string? explicitProd = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_PROD");
         string? explicitStaging = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_STAGING");
 
-        // Prefer Key Vault secret if specified
+        // Resolve which secret name to use (prod vs staging vs fallback)
         string? resolvedSecretName = null;
         if (secretClient != null)
         {
             if (staging && !string.IsNullOrWhiteSpace(explicitStaging))
-                resolvedSecretName = explicitStaging;
+                resolvedSecretName = explicitStaging.Trim();
             else if (!staging && !string.IsNullOrWhiteSpace(explicitProd))
-                resolvedSecretName = explicitProd;
+                resolvedSecretName = explicitProd.Trim();
             else if (!string.IsNullOrWhiteSpace(secretName))
-                resolvedSecretName = staging ? $"{secretName}-staging" : secretName; // suffix fallback
+                resolvedSecretName = staging ? $"{secretName.Trim()}-staging" : secretName.Trim();
         }
-    
-        if (!string.IsNullOrWhiteSpace(secretName) && secretClient != null)
+
+        // Use the resolved name if available
+        if (!string.IsNullOrWhiteSpace(resolvedSecretName) && secretClient != null)
         {
             try
             {
-                KeyVaultSecret secret = await secretClient.GetSecretAsync(secretName);
+                KeyVaultSecret secret = await secretClient.GetSecretAsync(resolvedSecretName);
                 var key = KeyFactory.FromPem(secret.Value);
                 var ctx = new AcmeContext(server, key);
-                // Validate account existence by querying (light)
                 _ = await ctx.Account();
                 return (ctx, null, false);
             }
             catch (RequestFailedException ex) when (ex.Status == 404)
             {
-                // Need to create
                 var newKey = KeyFactory.NewKey(KeyAlgorithm.RS256);
                 var newCtx = new AcmeContext(server, newKey);
                 await newCtx.NewAccount(email, true);
-                await secretClient.SetSecretAsync(new KeyVaultSecret(secretName!, newKey.ToPem()));
+                await secretClient.SetSecretAsync(new KeyVaultSecret(resolvedSecretName, newKey.ToPem()));
                 return (newCtx, null, true);
             }
             catch (Exception ex)
             {
-                return (null, _responses.Error("account_error", "Failed loading ACME account from Key Vault secret '{resolvedSecretName}'.",
-                    ex.Message), false);
+                return (null,
+                    _responses.Error("account_error",
+                        $"Failed loading ACME account from Key Vault secret '{resolvedSecretName}'.",
+                        ex.Message),
+                    false);
             }
         }
 
-        // Blob fallback
+        // Blob fallback (shared per staging/prod)
         try
         {
             var pem = await _storage.ReadAccountKeyPemAsync(staging);
@@ -94,7 +96,9 @@ public class AcmeAccountService
         }
         catch (Exception ex)
         {
-            return (null, _responses.Error("account_error", "Failed to create or load ACME account.", ex.Message), false);
+            return (null,
+                _responses.Error("account_error", "Failed to create or load ACME account.", ex.Message),
+                false);
         }
     }
 }

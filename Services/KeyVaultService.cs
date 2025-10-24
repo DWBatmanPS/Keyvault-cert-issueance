@@ -33,37 +33,41 @@ public class KeyVaultService
         byte[] pfxBytes,
         string? password,
         string[] domains,
-        bool renewed)
+        bool renewed,
+        bool leafOnly = false)
     {
         try
-        {
-            var (certClient, _) = BuildClients(keyVaultName);
-            var options = new ImportCertificateOptions(certificateName, pfxBytes)
             {
-                Password = password
-            };
-            // Tag SAN list for future renewals
-            options.Tags["sanList"] = string.Join(",", domains);
+                var (certClient, _) = BuildClients(keyVaultName);
+                var options = new ImportCertificateOptions(certificateName, pfxBytes)
+                {
+                    Password = password
+                };
+                options.Tags["sanList"] = string.Join(",", domains);
+                if (renewed) options.Tags["renewed"] = "true";
+                    
+                                                    
+                if (leafOnly) options.Tags["leafOnly"] = "true";
 
-            var imported = await certClient.ImportCertificateAsync(options);
-            var x509 = new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
+                var imported = await certClient.ImportCertificateAsync(options);
+                var x509 = new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
 
-            var meta = new CertificateMetadata
+                var meta = new CertificateMetadata
+                {
+                    CertificateName = certificateName,
+                    Version = imported.Value.Properties.Version,
+                    NotBefore = x509.NotBefore,
+                    NotAfter = x509.NotAfter,
+                    Domains = domains,
+                    Renewed = renewed
+                };
+                return (meta, null);
+            }
+            catch (Exception ex)
             {
-                CertificateName = certificateName,
-                Version = imported.Value.Properties.Version,
-                NotBefore = x509.NotBefore,
-                NotAfter = x509.NotAfter,
-                Domains = domains,
-                Renewed = renewed
-            };
-            return (meta, null);
+                return (null, _responses.Error("kv_import_error", "Failed importing certificate.", ex.Message));
+            }
         }
-        catch (Exception ex)
-        {
-            return (null, _responses.Error("kv_import_error", "Failed importing certificate.", ex.Message));
-        }
-    }
 
     public async Task<(CertificateMetadata? meta, ApiError? error)> GetCurrentCertificateAsync(
         string keyVaultName,

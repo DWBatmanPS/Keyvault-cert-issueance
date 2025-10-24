@@ -54,12 +54,20 @@ public class RegisterAccountFunction
                 ?? (Environment.GetEnvironmentVariable("LE_USE_STAGING")?.Equals("true", StringComparison.OrdinalIgnoreCase) ?? false);
 
             string? vaultName = Environment.GetEnvironmentVariable("KEYVAULT_NAME");
-            string? acctSecretName = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME");
+            // Base fallback name (shared no-env override)
+            string? acctSecretNameBase = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME");
+            // Explicit per-environment names (optional)
+            string? acctSecretNameStaging = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_STAGING");
+            string? acctSecretNameProd = Environment.GetEnvironmentVariable("ACCOUNT_KEY_SECRET_NAME_PROD");
+
+            // Always create SecretClient if we have a vault (even if base name missing;
+            // AcmeAccountService will choose staging/prod env var name).
             SecretClient? secretClient = null;
-            if (!string.IsNullOrWhiteSpace(vaultName) && !string.IsNullOrWhiteSpace(acctSecretName))
+            if (!string.IsNullOrWhiteSpace(vaultName))
                 secretClient = new SecretClient(new Uri($"https://{vaultName}.vault.azure.net/"), _credential);
 
-            var ensureResult = await _acme.EnsureAccountAsync(email, staging, secretClient, acctSecretName);
+            // Pass only the base name; service will override with staging/prod env vars if set.
+            var ensureResult = await _acme.EnsureAccountAsync(email, staging, secretClient, acctSecretNameBase);
             var ctx = ensureResult.Context;
             var error = ensureResult.Error;
             var created = ensureResult.Created;
@@ -71,7 +79,11 @@ public class RegisterAccountFunction
             {
                 email,
                 staging,
-                created
+                created,
+                // helpful to surface which secret was used
+                secretNameUsed = staging
+                    ? (acctSecretNameStaging ?? (acctSecretNameBase != null ? $"{acctSecretNameBase}-staging" : null))
+                    : (acctSecretNameProd ?? acctSecretNameBase)
             };
             return await WriteJson(req, _responses.Success(correlationId, result));
         }
@@ -82,7 +94,7 @@ public class RegisterAccountFunction
                 _responses.Error("internal_error", "Unexpected failure.", ex.Message)));
         }
     }
-
+    
     private async Task<HttpResponseData> WriteJson<T>(HttpRequestData req, ApiResponse<T> payload)
     {
         var resp = req.CreateResponse(payload.HasError
