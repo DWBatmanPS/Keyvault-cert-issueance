@@ -123,7 +123,9 @@ public class CertificateOrderService
 
             string TrySubject(byte[] der)
             {
-                try { return new X509Certificate2(der).Subject; }
+                try { var cert = X509CertificateLoader.LoadCertificate(der).Subject;
+                    return cert;
+                }
                 catch { return "<unparseable>"; }
             }
 
@@ -144,7 +146,7 @@ public class CertificateOrderService
             // Manual leaf-only builder (pure .NET)
             byte[] BuildLeafOnlyPfx()
             {
-                var leafX509 = new X509Certificate2(leafDer);
+                var leafX509 = X509CertificateLoader.LoadCertificate(leafDer);
                 using var rsa = BuildPrivateKeyFromCsr(csrKey);
                 using var withKey = leafX509.CopyWithPrivateKey(rsa);
                 return string.IsNullOrEmpty(pfxPassword)

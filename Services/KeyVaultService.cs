@@ -50,7 +50,7 @@ public class KeyVaultService
                 if (leafOnly) options.Tags["leafOnly"] = "true";
 
                 var imported = await certClient.ImportCertificateAsync(options);
-                var x509 = new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
+                var x509 = X509CertificateLoader.LoadPkcs12(pfxBytes, password, X509KeyStorageFlags.Exportable);
 
                 var meta = new CertificateMetadata
                 {
