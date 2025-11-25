@@ -1,21 +1,22 @@
 @description('The name of the function app that you wish to create.')
 @maxLength(14)
 param appNamePrefix string = 'acmetestapp'
-
 @description('The location of the function app that you wish to create.')
 param location string = resourceGroup().location
-
 @description('Email address for ACME account.')
 param mailAddress string 
-
-
 @description('Enter the base URL of an existing Key Vault. (ex. https://example.vault.azure.net)')
 param keyVaultName string
-
 param ENDDNSZONE string
 param PARENTDNSZONE string
-param KVResourceGroup string
+param DeployPrivately bool = true
+param skuName string = 'standard'
+param rbacAuthorization bool = true
+param enabledForDeployment bool = false
+param enabledForDiskEncryption bool = false
+param enabledForTemplateDeployment bool = false
 
+var tenantId string = subscription().tenantId
 var privateEndpoints_storagepe_name = 'pe-${storageAccountName}'
 var privateEndpoints_kvpe_name = 'pe-${keyVaultName}'
 var functionAppName = 'func-${appNamePrefix}-${substring(uniqueString(resourceGroup().id, deployment().name), 0, 4)}'
@@ -135,7 +136,6 @@ resource DNSZone_roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04
   }
 }
 
-
 resource storageAccount 'Microsoft.Storage/storageAccounts@2025-01-01' = {
   name: storageAccountName
   location: location
@@ -197,6 +197,28 @@ resource storageTableRole 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   }
 }
 
+resource kv 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: keyVaultName
+  location: location
+  properties: {
+    enabledForDeployment: enabledForDeployment
+    enabledForDiskEncryption: enabledForDiskEncryption
+    enabledForTemplateDeployment: enabledForTemplateDeployment
+    tenantId: tenantId
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 60
+    enableRbacAuthorization: rbacAuthorization
+    sku: {
+      name: skuName
+      family: 'A'
+    }
+    networkAcls: {
+      defaultAction: 'Allow'
+      bypass: 'AzureServices'
+    }
+  }
+}
+
 resource appServicePlan 'Microsoft.Web/serverfarms@2024-11-01' = {
   name: appServicePlanName
   location: location
@@ -223,7 +245,7 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2024-11-01' = {
   }
 }
 
-resource privateEndpoints_kvpe_name_resource 'Microsoft.Network/privateEndpoints@2024-07-01' = {
+resource privateEndpoints_kvpe_name_resource 'Microsoft.Network/privateEndpoints@2024-07-01' = if(DeployPrivately) {
   name: privateEndpoints_kvpe_name
   location: location
   properties: {
@@ -231,7 +253,7 @@ resource privateEndpoints_kvpe_name_resource 'Microsoft.Network/privateEndpoints
       {
         name: privateEndpoints_kvpe_name
         properties: {
-          privateLinkServiceId: keyVault.id
+          privateLinkServiceId: kv.id
           groupIds: [
             'vault'
           ]
@@ -245,13 +267,13 @@ resource privateEndpoints_kvpe_name_resource 'Microsoft.Network/privateEndpoints
   }
 }
 
-resource kvprivateDNSZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+resource kvprivateDNSZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if(DeployPrivately) {
   name: 'privatelink.vaultcore.azure.net'
   location: 'global'
 }
 
 
-resource kvprivateDNSZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-04-01' = {
+resource kvprivateDNSZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-04-01' = if(DeployPrivately) {
   parent: privateEndpoints_kvpe_name_resource
   name: '${keyVaultName}ZoneGroup'
   properties: {
@@ -266,7 +288,7 @@ resource kvprivateDNSZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZon
   }
 }
 
-resource kvdnsvirtualNetworkLink_File 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2018-09-01' = {
+resource kvdnsvirtualNetworkLink_File 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2018-09-01' = if(DeployPrivately) {
   parent: kvprivateDNSZone
   name: '${privateEndpoints_kvpe_name}_to_${last(split(vNet.id, '/'))}'
   location: 'global'
@@ -278,17 +300,16 @@ resource kvdnsvirtualNetworkLink_File 'Microsoft.Network/privateDnsZones/virtual
   }
 }
 
-resource privateEndpoint_NIC_kvpe 'Microsoft.Network/networkInterfaces@2024-07-01' existing = {
+resource privateEndpoint_NIC_kvpe 'Microsoft.Network/networkInterfaces@2024-07-01' existing = if(DeployPrivately) {
   name: '${privateEndpoints_kvpe_name}-nic'
-  scope: resourceGroup()
   dependsOn: [
     privateEndpoints_kvpe_name_resource
   ]
 }
 
-resource KVPE_A_Record 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
+resource KVPE_A_Record 'Microsoft.Network/privateDnsZones/A@2020-06-01' = if(DeployPrivately) {
   parent: kvprivateDNSZone
-  name: keyVault.name
+  name: kv.name
   properties: {
     ttl: 3600
     aRecords: [
@@ -299,7 +320,7 @@ resource KVPE_A_Record 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
   }
 }
 
-resource privateEndpoints_storagepe_name_resource 'Microsoft.Network/privateEndpoints@2024-07-01' = {
+resource privateEndpoints_storagepe_name_resource 'Microsoft.Network/privateEndpoints@2024-07-01' = if(DeployPrivately) {
   name: privateEndpoints_storagepe_name
   location: location
   properties: {
@@ -321,13 +342,12 @@ resource privateEndpoints_storagepe_name_resource 'Microsoft.Network/privateEndp
   }
 }
 
-resource storprivateDNSZone 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+resource storprivateDNSZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if(DeployPrivately) {
   name: 'privatelink.blob.${environment().suffixes.storage}'
   location: 'global'
 }
 
-
-resource storprivateDNSZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-04-01' = {
+resource storprivateDNSZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2023-04-01' = if(DeployPrivately) {
   parent: privateEndpoints_storagepe_name_resource
   name: '${storageAccountName}ZoneGroup'
   properties: {
@@ -342,7 +362,7 @@ resource storprivateDNSZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZ
   }
 }
 
-resource stordnsvirtualNetworkLink_File 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2018-09-01' = {
+resource stordnsvirtualNetworkLink_File 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2018-09-01' = if(DeployPrivately) {
   parent: storprivateDNSZone
   name: '${privateEndpoints_storagepe_name}_to_${last(split(vNet.id, '/'))}'
   location: 'global'
@@ -354,7 +374,7 @@ resource stordnsvirtualNetworkLink_File 'Microsoft.Network/privateDnsZones/virtu
   }
 }
 
-resource privateEndpoint_NIC_storpe 'Microsoft.Network/networkInterfaces@2024-07-01' existing = {
+resource privateEndpoint_NIC_storpe 'Microsoft.Network/networkInterfaces@2024-07-01' existing = if(DeployPrivately) {
   name: '${privateEndpoints_storagepe_name}-nic'
   scope: resourceGroup()
   dependsOn: [
@@ -362,7 +382,7 @@ resource privateEndpoint_NIC_storpe 'Microsoft.Network/networkInterfaces@2024-07
   ]
 }
 
-resource storPE_A_Record 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
+resource storPE_A_Record 'Microsoft.Network/privateDnsZones/A@2020-06-01' = if(DeployPrivately) {
   parent: storprivateDNSZone
   name: storageAccount.name
   properties: {
@@ -374,7 +394,6 @@ resource storPE_A_Record 'Microsoft.Network/privateDnsZones/A@2020-06-01' = {
     ]
   }
 }
-
 
 resource workspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   name: workspaceName
@@ -414,7 +433,7 @@ resource functionApp 'Microsoft.Web/sites@2024-11-01' = {
     siteConfig: {
       numberOfWorkers: 1
       appSettings: concat(acmebotAppSettings)
-      netFrameworkVersion: 'v8.0'
+      netFrameworkVersion: 'v10.0'
       ftpsState: 'Disabled'
       minTlsVersion: '1.2'
       scmMinTlsVersion: '1.2'
@@ -436,7 +455,7 @@ resource functionApp 'Microsoft.Web/sites@2024-11-01' = {
       }
       runtime: {
         name: 'dotnet-isolated'
-        version: '8.0'
+        version: '10.0'
       }
       scaleAndConcurrency: {
         instanceMemoryMB: 512
@@ -467,21 +486,33 @@ resource sites_functionapp_subnet_link 'Microsoft.Web/sites/virtualNetworkConnec
   }
 }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
-  name: keyVaultName
-  scope: resourceGroup(KVResourceGroup)
+resource keyVault_CertOfficerroleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionAppName, KVCertOfficerRoleId)
+  scope:kv
+  properties: {
+    roleDefinitionId: KVCertOfficerRoleId
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
 }
 
-module keyVault_ruleAssignment 'authmodule.bicep' = {
-  name: 'keyVaultRoleAssignment'
-  scope: resourceGroup(KVResourceGroup)
-  params: {
-    functionAppNameprincipal: functionApp.identity.principalId
-    KVCertOfficerRoleId: KVCertOfficerRoleId
-    KVCryptoOfficerRoleId: KVCryptoOfficerRoleId
-    KVSecOfficerRoleId: KVSecOfficerRoleId
-    functionAppName: functionAppName
-    keyVaultName: keyVaultName
+resource keyVault_CryptoOfficerroleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionAppName, KVCryptoOfficerRoleId)
+  scope:kv
+  properties: {
+    roleDefinitionId: KVCryptoOfficerRoleId
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource keyVault_SecOfficerroleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionAppName, KVSecOfficerRoleId)
+  scope:kv
+  properties: {
+    roleDefinitionId: KVSecOfficerRoleId
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
   }
 }
 
@@ -519,7 +550,7 @@ resource vNet 'Microsoft.Network/virtualNetworks@2024-07-01' = {
         }
       }
       {
-        name: 'kv-pe-subnet'
+        name: 'pe-subnet'
         properties: {
           addressPrefix: '10.0.1.0/24'      
         }
